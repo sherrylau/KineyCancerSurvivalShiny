@@ -1,0 +1,429 @@
+---
+title: "Kidney Cancer Survival Analysis"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    social: menu
+    source: embed
+    orientation: row
+    vertical_layout: scroll
+    theme: yeti
+    #logo: ge_monogram_primary_white_RGB.png
+    #css: iids.css
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(OIsurv)
+library(survsim)
+library(broom)
+library(plotly)
+library(dplyr)
+library(gsubfn)
+library(DT)
+library(SurvCorr)
+
+impute_missing = function(data, method="average", column_exception="days_to_death"){
+  column = colnames(data)
+  column_data_list = NULL
+  for (i in 1:length(column)){
+    column_data = data[,column[[i]]]
+    if(column[[i]]!=column_exception){
+      if(class(column_data)=="factor"){
+          if(any(is.na(column_data))==TRUE){
+            column_data = as.character(column_data)
+            column_data[is.na(column_data)] = "Unknown"
+          }
+      } else if(class(column_data)=="integer"){
+        non_missing_data = column_data[!is.na(column_data)]
+        if(any(is.na(column_data))==TRUE){
+          if(method=="average"){
+            median_value = quantile(non_missing_data, p=0.5)
+            column_data[is.na(column_data)] = median_value
+          } else if(method=="random"){
+            random_value = sample(non_missing_data, length(column_data)-length(non_missing_data))
+            column_data[is.na(column_data)] = random_value
+          } else{
+            print("method specified is invalid")
+          }
+        }
+      } else if (class(column_data)=="numeric"){
+        non_missing_data = column_data[!is.na(column_data)]
+        if(any(is.na(column_data))==TRUE){
+          if(method=="average"){
+            mean_value = mean(non_missing_data)
+            column_data[is.na(column_data)] = mean_value
+          } else if (method=="random"){
+            random_value = sample(non_missing_data, length(column_data)-length(non_missing_data))
+            column_data[is.na(column_data)] = random_value
+          } else{
+            print("method specified is invalid")
+          }
+        }
+      } else{
+        print(paste("data type of column:", column[i], "is not supported"))
+      }
+    }
+    column_data_list[[i]] = column_data
+  }
+  imputed_data = do.call(cbind.data.frame, column_data_list)
+  colnames(imputed_data) = column
+  return(imputed_data)
+}
+
+SplitType = function(input_data){
+  if (is.data.frame(input_data)){
+    df_name = deparse(substitute(input_data))
+    numerical_attribute_list = c()
+    categorical_attribute_list = c()
+    timeseries_attribute_list = c()
+    notsupport_attribute_list = c()
+    all_column = colnames(input_data)
+    all_datatype = lapply(input_data, class)
+    for (i in 1:ncol(input_data))
+      if (all_datatype[i]=="numeric" | all_datatype[i]=="integer"){
+        numerical_attribute_list = c(numerical_attribute_list,all_column[i])
+      } else if (all_datatype[i]=="factor" | all_datatype[i]=="character" | is.ordered(input_data[[i]])) {
+        categorical_attribute_list = c(categorical_attribute_list,all_column[i])
+      } else if (all_datatype[i]=="Date" | all_datatype[i]=="POSIXlt" | all_datatype[i]=="POSIXct") {
+        timeseries_attribute_list = c(timeseries_attribute_list,all_column[i])
+      } else {
+        notsupport_attribute_list = c(notsupport_attribute_list,all_column[i])
+      }
+    return(list(numerical=numerical_attribute_list, categorical=categorical_attribute_list, timeseries=timeseries_attribute_list, notsupport=notsupport_attribute_list))
+  }
+}
+
+data = read.csv("data/data.csv")
+data_modified = data[-which(names(data) %in% c("days_to_birth","disease_code","file_uuid", "bcr","bcr_patient_barcode","bcr_patient_uuid","project_code","day_of_dcc_upload","month_of_dcc_upload","year_of_dcc_upload","patient_withdrawal","days_to_initial_pathologic_diagnosis","age_at_initial_pathologic_diagnosis","year_of_initial_pathologic_diagnosis","additional_studies","informed_consent_verified", "icd_o_3_site","follow_ups","drugs","radiations","tumor_tissue_site","day_of_form_completion","month_of_form_completion","year_of_form_completion"))]
+
+imputed_data = impute_missing(data_modified, method="average", column_exception="days_to_death")
+
+```
+
+Sidebar {.sidebar}
+========================================
+
+```{r}
+br()
+selectInput('disease_type', label='Select a Kidney Cancer Type', choices=NULL)
+disease = as.character(unique(imputed_data$histological_type))
+updateSelectInput(session, 'disease_type', choices = disease)
+br()
+```
+
+<strong>For Patient Features tab exploration</strong>
+
+```{r}
+selectInput('explore_feature', label='Select a Patient Feature for Exploration', choices=NULL)
+features = names(imputed_data)
+features = features[features!="patient_id"]
+features = features[features!="histological_type"]
+features = features[features!="vital_status"]
+features = features[features!="days_to_death"]
+updateSelectInput(session, 'explore_feature', choices = features)
+
+```
+
+<strong>For Patients Survival tab exploration</strong>
+
+```{r}
+selectInput('explore_survival', label='Select a Patient Feature for Exploration', choices=NULL)
+observe({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    s_features = SplitType(analysis_data)$categorical
+    s_features_new = NULL
+    for(i in 1:length(s_features)){
+      if(length(unique(sapply(analysis_data[,s_features[i]], as.character)))>1){
+        s_features_new[[i]] = s_features[i]
+      }
+    }
+    s_features_new = s_features_new[!is.na(s_features_new)]
+    s_features_new = c("all", s_features_new)
+    s_features_new = s_features_new[s_features_new!="patient_id"]
+    s_features_new = s_features_new[s_features_new!="vital_status"]
+    updateSelectInput(session, "explore_survival", choices = s_features_new)
+  }
+})
+
+```
+
+<strong>For Survival Model tab selection</strong>
+```{r}
+selectInput("model_features", "Select features you want to include to the Survival Model", choices=NULL, multiple=TRUE)
+observe({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type, ]
+    s_features_num = SplitType(analysis_data)$numerical
+    s_features_cat = SplitType(analysis_data)$categorical
+    s_features_cat_new = NULL
+    for (i in 1:length(s_features_cat)){
+      analysis_data[,s_features_cat[i]] = sapply(analysis_data[,s_features_cat[i]], as.character)
+      if(length(unique(analysis_data[,s_features_cat[i]]))>1){
+        s_features_cat_new[[i]] = s_features_cat[i]
+      }
+    }
+    s_features_cat_new = s_features_cat_new[!is.na(s_features_cat_new)]
+    s_features = c(s_features_num, s_features_cat_new)
+    updateSelectInput(session, "input_features", choices = s_features)
+  }
+})
+
+selectInput("model_type", "Select a type of survival model for analysis", choices=c("Regression", "Tree", "Forest"))
+```
+
+
+<strong>Patients Features </strong> 
+========================================
+
+Row
+---------------------------------------
+
+### Patient Data Description {data-padding=10}
+
+This dataset is collected from Nationwide Children's Hospital which observe 926 patients who experience three different types of kidney cancer (Kidney Chromophobe,  Kidney Clear Cell Renal Carcinoma, Kidney Papillary Renal Cell Carcinoma). Note that none of the patients withdraw from the experiment.
+
+Row
+----------------------------------------
+
+### Alive Patient Rate 
+```{r}
+renderValueBox({
+  analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+  percentAlive = round(nrow(analysis_data[analysis_data$vital_status=='Alive',])/nrow(analysis_data)*100,2)
+  valueBox(paste(percentAlive,"%",sep=""), icon="fa-user", color="#339900")
+})
+# gauge(percentAlive, min = 0, max = 100, symbol = '%', gaugeSectors(
+#   success = c(80, 100), warning = c(40, 79), danger = c(0, 39)
+# ))
+```
+
+### Average Days to Death
+```{r} 
+renderValueBox({
+  analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+  averageDaysDeath = as.integer(quantile(na.omit(analysis_data$days_to_death), prob=0.5))
+  valueBox(averageDaysDeath, icon = "fa-calendar", color="#CC0000")
+})
+# gauge(averageDaysDeath, min = 0, max = max(imputed_data$days_to_death, na.rm=TRUE), gaugeSectors(
+#   success = c(80, 100), warning = c(40, 79), danger = c(0, 39)
+# ))
+```
+
+Row
+-------------------------------------------
+
+### Patients Features - Chart {data-width=600, data-height=600}
+```{r}
+renderPlotly({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    if(!is.null(input$explore_feature)){
+      if(class(analysis_data[,input$explore_feature])=="numeric"|class(analysis_data[,input$explore_feature])=="integer"){
+        plot = ggplot(analysis_data, aes_string(x="vital_status", y=input$explore_feature, fill="vital_status")) + geom_boxplot() + scale_fill_brewer(palette="BrBG", guide = FALSE) + labs(x="Patients' Status", y=input$explore_feature)
+        ggplotly(plot)
+      } else if (class(analysis_data[,input$explore_feature])=="factor"){
+        gp_data = analysis_data %>% group_by_(.dots = lapply(c("vital_status", input$explore_feature), as.symbol)) %>% summarise(freq = length(patient_id)) %>% ungroup()
+        plot = ggplot(gp_data, aes_string(x="vital_status", y=input$explore_feature, fill="freq")) + geom_tile() + scale_fill_gradient(high="#CC0000", low="#FFFFFF") + labs(x="Patients' Status", y=input$explore_feature)
+        ggplotly(plot)
+      } else{
+        return()
+      }
+    }
+  }
+})
+
+  
+# library(rCharts)
+# renderChart({
+#   edgelist = ddply(imputed_data, c(input$explore_feature, "vital_status"), summarise, value = length(patient_id))
+#   sankey_plot = rCharts$new()
+#   sankey_plot$setLib('libraries/widgets/d3_sankey')
+#   sankey_plot$setTemplate(script = "libraries/widgets/d3_sankey/layouts/chart.html")
+#   sankey_plot$set(data = edgelist, nodeWidth = 15, nodePadding = 10, layout = 32)
+#   sankey_plot
+# })
+
+```
+
+### Patient Features - Table {data-width=400}
+```{r}
+renderDataTable({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    if(!is.null(input$explore_feature)){
+      feature = input$explore_feature
+      if(class(analysis_data[,input$explore_feature])=="numeric"|class(analysis_data[,input$explore_feature])=="integer"){
+        summary_table = analysis_data %>% group_by_("vital_status") %>% summarise_(.dots = fn$list(min = "min($feature)", mean = "round(mean($feature),2)", sd = "round(sd($feature),2)", max = "max($feature)"))
+        summary_table = data.frame(t(summary_table))
+        colnames(summary_table) = c("Alive","Dead")
+        summary_table = summary_table[2:5,]
+        datatable(summary_table, class = 'cell-border stripe',filter = "none", options = list(searching=FALSE, dom = 't', pageLength=10))
+        #summary_table
+      } else if (class(analysis_data[,input$explore_feature])=="factor"){
+        analysis_data[[input$explore_feature]] = sapply(analysis_data[[input$explore_feature]], as.character)
+        summary_table = as.data.frame.matrix(table(analysis_data[,input$explore_feature],analysis_data[,"vital_status"]))
+        #summary_table
+        datatable(summary_table, class = 'cell-border stripe',filter = "none", options = list(searching=FALSE, dom = 't', pageLength=10))
+      } else{
+        return()
+      }
+    }
+  }
+})
+
+renderPrint({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    if(is.null(input$explore_feature)){
+      feature = input$explore_feature
+      if(class(analysis_data[,feature])=="numeric"|class(analysis_data[,feature])=="integer"){
+        result = kruskal.test(analysis_data[[feature]] ~ analysis_data[["vital_status"]])
+        if (result$p.value > 0.05){
+          paste("Alive Patients and Dead Patients have NO SIGNIFICANT different", feature, "with P-value", round(result$p.value,2), "with Kruskal Wallis Testing")
+        } else{
+          paste("Alive Patients and Dead Patients have SIGNIFICANT different", feature, "with P-value", round(result$p.value,2), "with Kruskal Wallis Testing")
+        }
+      } else if (class(analysis_data[,input$explore_feature])=="factor"){
+        analysis_data[[feature]] = sapply(analysis_data[[feature]], as.character)
+        analysis_data[["vital_status"]] = sapply(analysis_data[["vital_status"]], as.character)
+        tw_table = table(analysis_data[[feature]], analysis_data[["vital_status"]])
+        result = chisq.test(tw_table, correct=TRUE)
+        if(result$p.value > 0.05){
+          paste("Alive Patients and Dead Patients have NO SIGNIFICANT different", feature, "with P-value", round(result$p.value,2), "with Chi-Squared Testing")
+        } else{
+          paste("Alive Patients and Dead Patients have SIGNIFICANT different", feature, "with P-value", round(result$p.value,2), "with Chi-Squared Testing")
+        }
+      } else{
+        return()
+      }
+    }
+  }
+})
+```
+
+
+<strong>Patients Survival </strong> 
+========================================
+
+Row
+----------------------------------------
+
+### Section Description {data-padding=10}
+Kaplan Meier estimate is applied to calculate probability of patients survival over time until deaths. This section provides 
+1. Survival functions in general 
+2. Univariate Mantel-Haenszel Test for categorical patients features for each of the Kidney disease
+
+
+Row {data-height=340}
+----------------------------------------
+### Patient General Survival Probability Esimate {data-width=700}
+```{r}
+renderPlotly({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    if(input$explore_survival=="all"){
+      analysis_data = analysis_data[which(names(analysis_data) %in% c("vital_status","days_to_death"))]
+      analysis_data$vital_status = ifelse(analysis_data$vital_status=="Alive",0,1)
+      survival = Surv(analysis_data$days_to_death, analysis_data$vital_status)
+      survival = survfit(survival ~ 1)
+      survival = tidy(survival)
+      survival_curve = ggplot(survival) + geom_line(aes(x=time, y=estimate), color="#0066CC", size=1) + geom_ribbon(aes(x=time, ymin=conf.low, ymax=conf.high), alpha=.25, fill="#CC0000") + labs(x="Days to Death", y="Kaplan Meier Survival Estimate")
+      ggplotly(survival_curve, width = 300, height = 300)
+    } else{
+      s_feature = input$explore_survival
+      analysis_data = analysis_data[which(names(analysis_data) %in% c("vital_status","days_to_death",s_feature))]
+      analysis_data[[s_feature]] = sapply(analysis_data[[s_feature]], as.character)
+      analysis_data$vital_status = ifelse(analysis_data$vital_status=="Alive",0,1)
+      survival = Surv(analysis_data$days_to_death, analysis_data$vital_status)
+      formula = as.formula(paste("survival~",s_feature))
+      survival = survfit(formula, data=analysis_data)
+      survival = tidy(survival)
+      survival_curve = ggplot(survival) + geom_line(aes(x=time, y=estimate, color=strata), size=1) + geom_ribbon(aes(x=time, ymin=conf.low, ymax=conf.high, fill=strata), alpha=.25) + labs(x="Days to Death", y="Kaplan Meier Survival Estimate")
+      ggplotly(survival_curve)
+    }
+    
+  } else(return())
+})
+```
+
+### Survival Probability Estimate
+```{r}
+renderTable({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    if(input$explore_survival=="all"){
+      analysis_data = analysis_data[which(names(analysis_data) %in% c("vital_status","days_to_death"))]
+      analysis_data$vital_status = ifelse(analysis_data$vital_status=="Alive",0,1)
+      survival = Surv(analysis_data$days_to_death, analysis_data$vital_status)
+      survival = survfit(survival ~ 1)
+      survival = tidy(survival)
+      survival = survival[,c('time','n.risk','n.event','estimate')]
+      survival
+    } else{
+      s_feature = input$explore_survival
+      analysis_data = analysis_data[which(names(analysis_data) %in% c("vital_status","days_to_death",s_feature))]
+      analysis_data[[s_feature]] = sapply(analysis_data[[s_feature]], as.character)
+      analysis_data$vital_status = ifelse(analysis_data$vital_status=="Alive",0,1)
+      survival = Surv(analysis_data$days_to_death, analysis_data$vital_status)
+      formula = as.formula(paste("survival~",s_feature))
+      survival = survfit(formula, data=analysis_data)
+      survival = tidy(survival)
+      survival = survival[,c('time','n.risk','n.event','estimate','strata')]
+      survival
+    }
+  } else(return())
+})
+```
+
+Row {data-height=200}
+---------------------------------------
+### Log Rank Test on Survival Probability 
+```{r}
+renderPrint({
+  if(!is.null(input$disease_type)){
+    analysis_data = imputed_data[imputed_data$histological_type==input$disease_type,]
+    if(input$explore_survival!="all"){
+      s_feature = input$explore_survival
+      analysis_data = analysis_data[which(names(analysis_data) %in% c("vital_status","days_to_death",s_feature))]
+      analysis_data[[s_feature]] = sapply(analysis_data[[s_feature]], as.character)
+      analysis_data$vital_status = ifelse(analysis_data$vital_status=="Alive",0,1)
+      survival = Surv(analysis_data$days_to_death, analysis_data$vital_status)
+      formula = as.formula(paste("survival~",s_feature))
+      survdiff(formula, data = analysis_data, rho = 0) 
+    }
+  }
+})
+```
+
+
+<strong> Survival Model </strong>
+========================================
+
+Row
+----------------------------------------
+
+### Survival Model Description {data-padding=10}
+```{r}
+renderText({
+  if(input$model_type=="Regression"){
+    print("The result displayed below utilize cox proportional hazard model with the assumption of proportional hazard. The model utilize the function 'coxph' under 'survival' package in R.")
+  } else if(input$model_type=="Tree"){
+    print("")
+  }
+})
+
+```
+
+### Survival Model Result
+```{r}
+# model = reactive({
+#   if(!is.null(input$model_features)){
+#       if(input$model_type=="Regression"){
+#         
+#       }
+#   }
+# 
+# })
+```
